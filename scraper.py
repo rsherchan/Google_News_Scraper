@@ -10,7 +10,7 @@ nlp = spacy.load('en')
 
 headers = {'x-api-key': 'secret'}
 
-entity_types=['PERSON', 'ORG', 'FACILITY', 'PRODUCT', 'EVENT', 'WORK_OF_ART']
+entity_types=['PERSON', 'ORG', 'FACILITY', 'PRODUCT', 'EVENT', 'WORK_OF_ART', 'GPE', 'FAC']
 
 def google_scraper(search, num):
     address="https://www.google.com/search?gl=us&hl=en&tbm=nws&q=%s&tbs=qdr:d&num=%d" % (search,num)
@@ -67,12 +67,18 @@ def call_to_text(call):
         texty=call.json()['content']
         texty=BeautifulSoup(texty, "html5lib").text
         url=call.json()['url']
-        return texty, url
+        author=call.json()['author']
+        return texty, url, author
     
     else:
         pass
 
-def extract_entities(text, url):
+def get_authors(call):
+    author=call.json()['author']
+    
+    return author
+    
+def extract_entities(text, url, author, all_types=False):
     word=[]
     type_word=[]
 
@@ -80,13 +86,19 @@ def extract_entities(text, url):
     ents = list(doc.ents)
 
     for i in ents:
-        if i.label_ in entity_types and re.sub(r'[^\x00-\x7F]+','', str(i)) != '':
-            word.append(str(i))
-            type_word.append(i.label_)
+        if all_types==True:
+            if re.sub(r'[^\x00-\x7F]+','', str(i)) != '':
+                word.append(str(i))
+                type_word.append(i.label_)
+        else:
+            if i.label_ in entity_types and re.sub(r'[^\x00-\x7F]+','', str(i)) != '' and str(i) != '\n':
+                word.append(str(i))
+                type_word.append(i.label_)
 
     both=pd.DataFrame(zip(word, type_word), columns=['word', 'word_type'])
     both['url']=str(url)
-    both.columns=['word', 'word_type', 'url']
+    both['author']=str(author)
+    both.columns=['word', 'word_type', 'url', 'author']
                       
     return both
 
@@ -96,29 +108,60 @@ def group(df):
     
     return df
     
-def combine(google):    
+def combine(google, all_types=False):    
     text_list = []
     url_list = []
     call_list=[]
+    author_list=[]
+    url_count = []
+    type_count= [] 
+    
     df=pd.DataFrame(columns=['word', 'word_type', 'url', 'count'])
-
+    
+    print ("*mercury api*")
     for url in google['url']:
+        print("calling: " + str(url))
         call=url_to_call(url)
+        print("status: " + str(call))
         call_list.append(call)
-
+        
+    print ("grabbing the content")
     for call in call_list:
-        print call
         if call.status_code == 200:
-            text, url = call_to_text(call)
+            text, url, author = call_to_text(call)
             text_list.append(text)
             url_list.append(url)
-
-    for text, url in zip(text_list, url_list):
-        df_ent=extract_entities(text, url)
-        df_ent=df_ent.groupby(df_ent.columns.tolist()).size().reset_index().rename(columns={0:'count'})
-        df=pd.concat([df,df_ent])
+            author_list.append(author)
     
-    df=df.groupby(['word', 'word_type'], as_index=False).agg({'count': 'sum', 'url': (lambda x: "%s" % ', '.join(x))})
-    df=df.sort_values(['count'], ascending=False).reset_index(drop=True)
+    print ("extracting the important words")            
+    for text, url, author in zip(text_list, url_list, author_list):
+        if all_types == True:
+            df_ent=extract_entities(text, url, author, all_types=True)
+            df_ent=df_ent.groupby(df_ent.columns.tolist()).size().reset_index().rename(columns={0:'count'})
+            df=pd.concat([df,df_ent])
+        else:
+            df_ent=extract_entities(text, url, author)
+            df_ent=df_ent.groupby(df_ent.columns.tolist()).size().reset_index().rename(columns={0:'count'})
+            df=pd.concat([df,df_ent])
+    
+    df=df.groupby(['word'], as_index=False).agg({'count': 'sum', 'url': (lambda x: "%s" % ', '.join(x)), 'word_type': (lambda y: "%s" % ', '.join(y)), 'author': (lambda z: ', '.join(z))})
 
-    return df
+    for x in df['url']:
+        temp=x.split(", ")
+        temp = set(temp)
+        temp = len(temp)
+        url_count.append(temp)
+
+    df['url_count']=url_count        
+        
+    for x in df['word_type']:
+        temp = x.split(", ")
+        temp = set(temp)
+        type_count.append(temp)
+        
+    df['word_type']=type_count
+    
+    df=df.sort_values(['url_count', 'count'], ascending=False).reset_index(drop=True)
+    
+    author_list = pd.DataFrame(data={'authors':author_list,'url_list':url_list})
+    return df, author_list
